@@ -3,7 +3,144 @@ name: Node.js tests
 on: [push, pull_request]
 
 jobs:
+  dd_plan:
+    if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.dd_plan.outputs.matrix }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v4
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm install
+
+      - name: Configure Datadog Test Optimization
+        uses: datadog/test-visibility-github-action@v3
+        with:
+          languages: js
+          api_key: ${{ secrets.DD_API_KEY }}
+          site: datadoghq.com
+
+      - name: Install ddtest
+        run: |
+          mkdir -p bin
+          curl -fsSL https://github.com/DataDog/ddtest/releases/latest/download/ddtest-linux-amd64 -o bin/ddtest
+          chmod +x bin/ddtest
+
+      - name: Plan Node.js tests
+        id: dd_plan
+        working-directory: pkgs/core
+        run: |
+          rm -rf .testoptimization
+          ../../bin/ddtest plan --platform javascript --framework vitest --command "pnpm exec vitest run --project main" --min-parallelism 1 --max-parallelism 4
+        env:
+          NODE_OPTIONS: -r ${{ env.DD_TRACE_PACKAGE }} --import ${{ env.DD_TRACE_ESM_IMPORT }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ddtest-plan-node-26
+          path: pkgs/core/.testoptimization/
+          include-hidden-files: true
+          if-no-files-found: error
+
   tests:
+    if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    needs: dd_plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.dd_plan.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v4
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm install
+
+      - name: Configure Datadog Test Optimization
+        uses: datadog/test-visibility-github-action@v3
+        with:
+          languages: js
+          api_key: ${{ secrets.DD_API_KEY }}
+          site: datadoghq.com
+
+      - name: Install ddtest
+        run: |
+          mkdir -p bin
+          curl -fsSL https://github.com/DataDog/ddtest/releases/latest/download/ddtest-linux-amd64 -o bin/ddtest
+          chmod +x bin/ddtest
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ddtest-plan-node-26
+          path: pkgs/core/.testoptimization/
+
+      - name: Node.js tests
+        run: |
+          test -f .testoptimization/manifest.txt
+          ../../bin/ddtest run --platform javascript --framework vitest --command "pnpm exec vitest run --project main" --ci-node ${{ matrix.ci_node_index }}
+        working-directory: pkgs/core
+        env:
+          NODE_OPTIONS: -r ${{ env.DD_TRACE_PACKAGE }} --import ${{ env.DD_TRACE_ESM_IMPORT }}
+
+  compatibility:
+    if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v4
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm install
+
+      - name: Configure Datadog Test Optimization
+        uses: datadog/test-visibility-github-action@v3
+        with:
+          languages: js
+          api_key: ${{ secrets.DD_API_KEY }}
+          site: datadoghq.com
+
+      - name: Node.js compatibility tests
+        working-directory: pkgs/core
+        shell: bash
+        run: |
+          for version in 22 24 25; do
+            printf "\n🚧 Running tests in %s\n" "$version"
+            mise x "node@${version}" -- pnpm vitest run --project main
+          done
+        env:
+          NODE_OPTIONS: -r ${{ env.DD_TRACE_PACKAGE }} --import ${{ env.DD_TRACE_ESM_IMPORT }}
+
+      - name: Time zone compatibility tests
+        working-directory: pkgs/core
+        shell: bash
+        run: |
+          for version in 22 24 25 26; do
+            printf "\n🚧 Running time zone tests in %s\n" "$version"
+            mise x "node@${version}" -- ./scripts/test/tz.sh
+          done
+
+  uninstrumented_tests:
+    if: github.actor == 'dependabot[bot]' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
 
     steps:
